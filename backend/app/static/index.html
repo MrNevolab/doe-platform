@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>DoE Design Generator</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a2e; background: #f7f8fa; }
+  h1 { font-size: 1.4rem; }
+  .card { background: #fff; border-radius: 8px; padding: 1.2rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  label { display: block; font-size: .85rem; margin-bottom: .2rem; color: #555; }
+  input, select { padding: .4rem; border: 1px solid #ccc; border-radius: 4px; margin-bottom: .8rem; width: 100%; box-sizing: border-box; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: .8rem; }
+  button { background: #2563eb; color: #fff; border: 0; padding: .6rem 1.4rem; border-radius: 6px; cursor: pointer; font-size: .95rem; }
+  button:hover { background: #1d4ed8; }
+  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+  th, td { border: 1px solid #e2e8f0; padding: .35rem .6rem; text-align: right; }
+  th { background: #eef2f7; }
+  .error { color: #b91c1c; }
+  .factors-config { margin-top: .5rem; }
+  .factor-row { display: flex; gap: .5rem; margin-bottom: .4rem; }
+  .factor-row input { margin-bottom: 0; }
+</style>
+</head>
+<body>
+<h1>DoE Design Generator</h1>
+
+<div class="card">
+  <label>Design-Typ</label>
+  <select id="designType">
+    <option value="full_factorial">Vollfaktoriell</option>
+    <option value="fractional_factorial">Fraktionell-faktoriell</option>
+    <option value="plackett_burman">Plackett-Burman (Screening)</option>
+    <option value="central_composite">Central Composite (RSM)</option>
+    <option value="box_behnken">Box-Behnken (RSM)</option>
+  </select>
+  <div class="grid">
+    <div><label>Anzahl Faktoren</label><input id="nFactors" type="number" value="3" min="1" max="12"></div>
+    <div><label>Zentrumspunkte</label><input id="centerPoints" type="number" value="4" min="1"></div>
+    <div><label>Auflösung (fraktionell)</label><input id="resolution" type="number" value="3" min="3" max="5"></div>
+    <div><label>Replikate</label><input id="replicates" type="number" value="1" min="1"></div>
+    <div><label>Blöcke</label><input id="blocks" type="number" value="1" min="1"></div>
+    <div><label>Randomisieren</label><select id="randomize"><option value="1">ja</option><option value="0">nein</option></select></div>
+  </div>
+</div>
+
+<div class="card factors-config">
+  <label>Faktoren (Name, Einheit, Tief, Hoch)</label>
+  <div id="factorRows"></div>
+</div>
+
+<div class="card">
+  <button onclick="generate()">Design generieren</button>
+  <button onclick="exportCsv()" style="background:#059669">CSV-Export</button>
+  <span id="status" class="error"></span>
+</div>
+
+<div class="card" id="resultCard" style="display:none">
+  <h3 id="resultSummary"></h3>
+  <div style="overflow-x:auto"><table id="resultTable"></table></div>
+</div>
+
+<script>
+const API = window.location.origin;
+
+function factorInputs() {
+  const rows = [];
+  document.querySelectorAll('#factorRows .factor-row').forEach(r => {
+    const [name, unit, low, high] = r.querySelectorAll('input');
+    if (name.value.trim()) rows.push({ name: name.value.trim(), unit: unit.value.trim() || null, low: +low.value, high: +high.value });
+  });
+  return rows;
+}
+
+function rebuildFactors() {
+  const n = +document.getElementById('nFactors').value;
+  const container = document.getElementById('factorRows');
+  container.innerHTML = '';
+  const presets = ['Temp / °C / 20 / 80', 'Rührspeed / rpm / 200 / 800', 'Volumen / mL / 1 / 5',
+                    'Konzentration / mM / 10 / 100', 'pH / - / 2 / 10', 'Zeit / h / 1 / 24'];
+  for (let i = 0; i < n; i++) {
+    const [nm, un, lo, hi] = (presets[i] || `Faktor ${i+1} / - / -1 / 1`).split(' / ');
+    const row = document.createElement('div');
+    row.className = 'factor-row';
+    row.innerHTML = `<input placeholder="Name" value="${nm}"><input placeholder="Einheit" value="${un}">
+      <input type="number" placeholder="tief" value="${lo}"><input type="number" placeholder="hoch" value="${hi}">`;
+    container.appendChild(row);
+  }
+}
+
+function payload() {
+  const dt = document.getElementById('designType').value;
+  return {
+    design_type: dt,
+    factors: factorInputs(),
+    center_points: +document.getElementById('centerPoints').value,
+    resolution: +document.getElementById('resolution').value,
+    replicates: +document.getElementById('replicates').value,
+    blocks: +document.getElementById('blocks').value,
+    randomize: document.getElementById('randomize').value === '1',
+    seed: 42
+  };
+}
+
+async function postDesign(endpoint) {
+  const res = await fetch(API + endpoint, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload()) });
+  return res;
+}
+
+function renderTable(design) {
+  const headers = ['run_id', 'block', ...design.factors.map(f => f.name)];
+  const table = document.getElementById('resultTable');
+  table.innerHTML = '';
+  const thead = document.createElement('thead');
+  const hr = thead.insertRow();
+  headers.forEach(h => { const th = document.createElement('th'); th.textContent = h; hr.appendChild(th); });
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  table.appendChild(tbody);
+  design.runs.forEach(run => {
+    const tr = tbody.insertRow();
+    tr.insertCell().textContent = run.run_id;
+    tr.insertCell().textContent = run.block;
+    design.factors.forEach(f => tr.insertCell().textContent = run.factors[f.name]);
+  });
+  document.getElementById('resultSummary').textContent = `${design.n_runs} Läufe, ${design.n_factors} Faktoren`;
+  document.getElementById('resultCard').style.display = 'block';
+}
+
+async function generate() {
+  document.getElementById('status').textContent = '';
+  const res = await postDesign('/designs');
+  const body = await res.json();
+  if (!res.ok) { document.getElementById('status').textContent = body.detail || 'Fehler'; return; }
+  window._design = body;
+  renderTable(body);
+}
+
+async function exportCsv() {
+  const res = await postDesign('/designs/export?fmt=csv');
+  if (!res.ok) { const b = await res.json(); document.getElementById('status').textContent = b.detail || 'Fehler'; return; }
+  const blob = await res.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'doe_design.csv';
+  a.click();
+}
+
+document.getElementById('nFactors').addEventListener('input', rebuildFactors);
+document.getElementById('designType').addEventListener('change', () => {
+  const dt = document.getElementById('designType').value;
+  document.getElementById('centerPoints').parentElement.style.display = ['central_composite','box_behnken'].includes(dt) ? '' : 'none';
+  document.getElementById('resolution').parentElement.style.display = dt === 'fractional_factorial' ? '' : 'none';
+});
+rebuildFactors();
+</script>
+</body>
+</html>
